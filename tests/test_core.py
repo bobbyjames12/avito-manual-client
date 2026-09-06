@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock
 import xml.etree.ElementTree as ET
 import zipfile
+from urllib.error import HTTPError
 
 from avito_client.model import new_ad, build_xml, validate
 from avito_client.store import Store
@@ -120,7 +121,7 @@ class PublishTests(unittest.TestCase):
     def test_photo_upload_failure_does_not_replace_feed(self):
         client = Mock()
         client.put_object.side_effect = OSError("network failure")
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(RuntimeError, "Ошибка записи в S3"):
             publish([listing()], self.temp.name, self.config, client=client, public_check=Mock())
         self.assertEqual(client.put_object.call_count, 1)
         self.assertNotIn("feed.xml", client.put_object.call_args.kwargs["Key"])
@@ -131,6 +132,25 @@ class PublishTests(unittest.TestCase):
             publish([listing()], self.temp.name, self.config, client=client,
                     public_check=Mock(side_effect=PermissionError("403")))
         self.assertEqual(client.put_object.call_count, 1)
+
+    def test_public_404_identifies_photo_url_and_keeps_feed_untouched(self):
+        client = Mock()
+        error = HTTPError("https://cdn.example.com/missing", 404, "Not Found", {}, None)
+        with self.assertRaisesRegex(RuntimeError, "Фотография") as raised:
+            publish([listing()], self.temp.name, self.config, client=client,
+                    public_check=Mock(side_effect=error))
+        self.assertIn("HTTP 404", str(raised.exception))
+        self.assertIn("https://cdn.example.com/bucket/manual/test/photos/photo.jpg", str(raised.exception))
+        self.assertEqual(client.put_object.call_count, 1)
+
+    def test_feed_404_identifies_xml_after_successful_photo_check(self):
+        client = Mock()
+        error = HTTPError("https://cdn.example.com/missing", 404, "Not Found", {}, None)
+        with self.assertRaisesRegex(RuntimeError, "XML-фид") as raised:
+            publish([listing()], self.temp.name, self.config, client=client,
+                    public_check=Mock(side_effect=[None, error]))
+        self.assertIn("manual/test/feed.xml", str(raised.exception))
+        self.assertEqual(client.put_object.call_count, 2)
 
     def test_missing_photo_fails_before_any_upload(self):
         ad = listing()

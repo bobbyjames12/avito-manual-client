@@ -202,8 +202,8 @@ class Settings(QDialog):
         try:
             check_config(config)
             previous = json.loads(self.store.get_setting("s3", "{}"))
-            if self.store.jobs() and any(config[k] != previous.get(k) for k in ("endpoint", "bucket", "prefix", "public_base")):
-                raise ValueError("После первой попытки отправки адрес фида закреплён. Смена хранилища требует отдельного переноса, чтобы не потерять связь с объявлениями.")
+            if self.store.jobs() and any(config[k] != previous.get(k) for k in ("endpoint", "bucket", "prefix")):
+                raise ValueError("После первой попытки отправки бакет и папка фида закреплены. Public URL можно исправить. Смена хранилища требует отдельного переноса.")
             for key in ("access_key", "secret_key"):
                 config[key] = protect(config[key])
             self.store.setting("s3", json.dumps(config))

@@ -3,6 +3,7 @@ import mimetypes
 import re
 from urllib.parse import quote, urlsplit
 from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
 from .model import build_xml
 
 
@@ -42,22 +43,46 @@ def publish(ads, root, config, progress=lambda message: None, client=None, publi
             raise ValueError("Фотография не найдена в локальной библиотеке: " + name)
 
     def check(url, expected=None):
-        if public_check:
-            return public_check(url, expected)
-        with urlopen(url, timeout=30) as response:
-            if response.status != 200:
-                raise RuntimeError("Файл недоступен Авито по публичной ссылке.")
-            if expected is not None and response.read() != expected:
-                raise RuntimeError("Публичный XML ещё не обновился. Проверьте кэш S3/CDN и повторите отправку.")
-            if expected is None:
-                response.read(1)
+        stage = "XML-фид" if expected is not None else "Фотография"
+        context = f"{stage} загружен(а) в S3, но проверка публичного адреса не прошла.\nURL: {url}"
+        try:
+            if public_check:
+                return public_check(url, expected)
+            with urlopen(url, timeout=30) as response:
+                if response.status != 200:
+                    raise HTTPError(url, response.status, "Unexpected status", response.headers, None)
+                if expected is not None and response.read() != expected:
+                    raise RuntimeError(context + "\nПо ссылке вернулось другое содержимое. "
+                                       "Проверьте Public URL и кэш S3/CDN, затем повторите отправку.")
+                if expected is None:
+                    response.read(1)
+        except HTTPError as exc:
+            if exc.code == 404:
+                hint = ("Проверьте Public URL: нужен публичный адрес корня бакета, "
+                        "без папки клиента и без feed.xml. Клиент добавляет их сам. "
+                        "Также проверьте доступ на чтение и настройки CDN.")
+            elif exc.code in (401, 403):
+                hint = "Настройте публичное чтение фото и XML без авторизации в политике S3 или CDN."
+            else:
+                hint = "Проверьте доступность публичного адреса и повторите отправку."
+            raise RuntimeError(f"{context}\nHTTP {exc.code}. {hint}") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError(context + "\nНе удалось получить ответ по HTTPS. "
+                               "Проверьте Public URL, интернет и сертификат хранилища.") from exc
 
     def put(key, data, content_type):
         kwargs = dict(Bucket=config["bucket"], Key=key, Body=data, ContentType=content_type)
         if config.get("public_acl"):
             kwargs["ACL"] = "public-read"
         kwargs["CacheControl"] = "no-cache" if content_type.startswith("application/xml") else "public, max-age=31536000, immutable"
-        client.put_object(**kwargs)
+        try:
+            client.put_object(**kwargs)
+        except Exception as exc:
+            details = getattr(exc, "response", {})
+            code = details.get("Error", {}).get("Code", type(exc).__name__)
+            raise RuntimeError(f"Ошибка записи в S3 ({code}).\n"
+                               f"Endpoint: {config['endpoint']}\nБакет: {config['bucket']}\nОбъект: {key}\n"
+                               "Проверьте endpoint, имя бакета, ключи и права на запись.") from exc
 
     for index, name in enumerate(photos, 1):
         progress(f"Фотографии: {index} из {len(photos)}")
