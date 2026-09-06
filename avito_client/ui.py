@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QPalette, QColor
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QUrl
+from PySide6.QtGui import QIcon, QPixmap, QPalette, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTextEdit, QComboBox, QFormLayout, QScrollArea,
@@ -99,7 +99,7 @@ class Settings(QDialog):
         super().__init__(parent)
         self.store = store
         self.setWindowTitle("Настройки автозагрузки по ссылке")
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(860)
         layout = QVBoxLayout(self)
         note = QLabel("Клиент обновляет фото и XML в S3. Постоянную ссылку ниже нужно один раз\n"
                       "указать в настройках автозагрузки Авито. Отдельный сервер не нужен.")
@@ -124,7 +124,15 @@ class Settings(QDialog):
             if key == "public_base":
                 edit.setPlaceholderText("https://storage.yandexcloud.net/имя-бакета")
             self.inputs[key] = edit
-            form.addRow(title, edit)
+            if key == "public_base":
+                row = QHBoxLayout()
+                row.addWidget(edit, 1)
+                row.addWidget(button("Вставить", self.paste_public_base))
+                self.open_base = button("Открыть", lambda: self.open_url(self.inputs["public_base"].text()))
+                row.addWidget(self.open_base)
+                form.addRow(title, row)
+            else:
+                form.addRow(title, edit)
         layout.addLayout(form)
         self.acl = QCheckBox("Отправлять ACL public-read (если этого требует хранилище)")
         self.acl.setChecked(saved.get("public_acl", False))
@@ -134,7 +142,18 @@ class Settings(QDialog):
         self.url = QLineEdit()
         self.url.setReadOnly(True)
         layout.addWidget(QLabel("Постоянная ссылка для Авито"))
-        layout.addWidget(self.url)
+        url_row = QHBoxLayout()
+        url_row.addWidget(self.url, 1)
+        self.copy_feed = button("Скопировать", self.copy_url)
+        self.open_feed = button("Открыть", lambda: self.open_url(self.url.text()))
+        url_row.addWidget(self.copy_feed)
+        url_row.addWidget(self.open_feed)
+        layout.addLayout(url_row)
+        hint = QLabel("Public URL — адрес вашего бакета. Ссылку для Авито скопируйте кнопкой выше.\n"
+                      "Фид начнёт открываться после первой успешной отправки очереди в S3.")
+        hint.setWordWrap(True)
+        hint.setProperty("muted", True)
+        layout.addWidget(hint)
         for edit in self.inputs.values():
             edit.textChanged.connect(self.update_url)
         self.update_url()
@@ -151,9 +170,32 @@ class Settings(QDialog):
     def values(self):
         return {**{k: v.text().strip() for k, v in self.inputs.items()}, "public_acl": self.acl.isChecked()}
 
+    def paste_public_base(self):
+        edit = self.inputs["public_base"]
+        edit.setText(QApplication.clipboard().text().strip())
+        edit.setFocus()
+
+    def copy_url(self):
+        QApplication.clipboard().setText(self.url.text())
+        self.error.setText("Ссылка для Авито скопирована.")
+
+    @staticmethod
+    def valid_link(text):
+        url = QUrl(text.strip())
+        return url.isValid() and url.scheme() == "https" and bool(url.host()) and not url.userInfo()
+
+    def open_url(self, text):
+        if self.valid_link(text) and not QDesktopServices.openUrl(QUrl(text.strip())):
+            self.error.setText("Не удалось открыть браузер. Скопируйте ссылку вручную.")
+
     def update_url(self):
         config = self.values()
-        self.url.setText(public_url(config, config["prefix"].strip("/") + "/feed.xml") if config["public_base"] else "")
+        base_valid = self.valid_link(config["public_base"])
+        self.url.setText(public_url(config, config["prefix"].strip("/") + "/feed.xml")
+                         if base_valid and config["prefix"].strip("/") else "")
+        self.open_base.setEnabled(base_valid)
+        self.copy_feed.setEnabled(bool(self.url.text()))
+        self.open_feed.setEnabled(bool(self.url.text()))
 
     def save(self):
         config = self.values()
