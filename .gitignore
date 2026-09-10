@@ -16,3 +16,5 @@ dist-contrast/
 *.sqlite3-*
 *.db
 *.db-*
+
+*.avitoconfig

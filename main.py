@@ -43,7 +43,15 @@ def main():
     if not lock.tryLock(100):
         QMessageBox.information(None, "Авито · Ручной клиент", "Клиент уже запущен. Откройте существующее окно.")
         return 0
-    window = Window()
+    store = Store()
+    profile = (Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent) / "settings.avitoconfig"
+    if profile.exists() and not store.get_setting("s3"):
+        from avito_client.profile import read_profile, save_profile
+        try:
+            save_profile(store, read_profile(profile))
+        except Exception:
+            QMessageBox.warning(None, "Настройки S3", "Не удалось загрузить settings.avitoconfig. Выберите файл в настройках S3.")
+    window = Window(store)
     window.show()
     return app.exec()
 

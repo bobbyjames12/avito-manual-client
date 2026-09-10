@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from .model import new_ad, FIELDS, validate
 from .store import Store
+from .profile import read_profile
 from .secrets import protect, unprotect
 from .publisher import publish, check_config, public_url
 
@@ -98,6 +99,7 @@ class Settings(QDialog):
     def __init__(self, store, parent):
         super().__init__(parent)
         self.store = store
+        self.imported_profile = False
         self.setWindowTitle("Настройки автозагрузки по ссылке")
         self.setMinimumWidth(860)
         layout = QVBoxLayout(self)
@@ -105,6 +107,7 @@ class Settings(QDialog):
                       "указать в настройках автозагрузки Авито. Отдельный сервер не нужен.")
         note.setWordWrap(True)
         layout.addWidget(note)
+        layout.addWidget(button("Загрузить настройки из файла", self.import_profile))
         form = QFormLayout()
         self.inputs = {}
         saved = json.loads(store.get_setting("s3", "{}"))
@@ -167,6 +170,20 @@ class Settings(QDialog):
         controls.rejected.connect(self.reject)
         layout.addWidget(controls)
 
+    def import_profile(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выберите файл настроек", "", "Настройки Авито (*.avitoconfig)")
+        if not path:
+            return
+        try:
+            config = read_profile(path)
+            for key, edit in self.inputs.items():
+                edit.setText(config[key])
+            self.acl.setChecked(config["public_acl"])
+            self.imported_profile = True
+            self.error.setText("Настройки загружены. Нажмите «Сохранить».")
+        except Exception:
+            self.error.setText("Не удалось прочитать файл настроек. Выберите исходный файл .avitoconfig.")
+
     def values(self):
         return {**{k: v.text().strip() for k, v in self.inputs.items()}, "public_acl": self.acl.isChecked()}
 
@@ -202,7 +219,7 @@ class Settings(QDialog):
         try:
             check_config(config)
             previous = json.loads(self.store.get_setting("s3", "{}"))
-            if self.store.jobs() and any(config[k] != previous.get(k) for k in ("endpoint", "bucket", "prefix")):
+            if self.store.jobs() and any(config[k] != previous.get(k) for k in ("endpoint", "bucket", "prefix")) and not (self.imported_profile and not any(row["sent"] for row in self.store.all())):
                 raise ValueError("После первой попытки отправки бакет и папка фида закреплены. Public URL можно исправить. Смена хранилища требует отдельного переноса.")
             for key in ("access_key", "secret_key"):
                 config[key] = protect(config[key])
