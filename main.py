@@ -3,7 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from avito_client.store import data_directory, Store
@@ -53,6 +53,7 @@ def main():
             QMessageBox.warning(None, "Настройки S3", "Не удалось загрузить settings.avitoconfig. Выберите файл в настройках S3.")
     window = Window(store)
     window.show()
+    QTimer.singleShot(1500, window.check_updates)
     return app.exec()
 
 

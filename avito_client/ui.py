@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTextEdit, QComboBox, QFormLayout, QScrollArea,
     QListWidget, QListWidgetItem, QSplitter, QFileDialog, QMessageBox,
-    QDialog, QDialogButtonBox, QCheckBox, QAbstractItemView, QCompleter,
+    QDialog, QDialogButtonBox, QCheckBox, QAbstractItemView, QCompleter, QTabWidget, QMenu,
 )
 
 from .model import new_ad, FIELDS, validate, CHOICES, MULTIPLE, REQUIRED, field_issues, validate_assets, SUPPORTED_DELIVERY
@@ -134,6 +134,23 @@ class Worker(QThread):
                 if self.config.get(key):
                     message = message.replace(self.config[key], "***")
             self.failed.emit(message)
+
+
+class UpdateWorker(QThread):
+    result = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, info=None):
+        super().__init__()
+        self.info = info
+
+    def run(self):
+        from .updater import latest, download
+        try:
+            self.result.emit(download(self.info, self.progress.emit) if self.info else latest())
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class Settings(QDialog):
@@ -281,7 +298,7 @@ class Window(QMainWindow):
         self.loading = False
         self.dirty = False
         self.worker = None
-        self.setWindowTitle("Авито · Ручной клиент")
+        self.setWindowTitle("Авито · Ручной клиент 0.3.0")
         self.resize(1260, 880)
         self.setMinimumSize(1000, 680)
         shell = QWidget()
@@ -293,13 +310,16 @@ class Window(QMainWindow):
         title.setProperty("heading", True)
         top.addWidget(title)
         top.addStretch()
-        top.addWidget(button("История", self.history))
-        top.addWidget(button("Резервная копия", self.backup))
-        top.addWidget(button("Настройки S3", self.settings))
+        more = QPushButton("Меню")
+        menu = QMenu(more)
+        for label, callback in [("Настройки подключения", self.settings), ("История отправок", self.history), ("Резервная копия", self.backup), ("Проверить обновления", lambda: self.check_updates(True))]:
+            menu.addAction(label, callback)
+        more.setMenu(menu)
+        top.addWidget(more)
         layout.addLayout(top)
         subtitle = QLabel("Кофты и футболки  /  Ручное заполнение  /  Автозагрузка по постоянной ссылке")
         subtitle.setProperty("muted", True)
-        layout.addWidget(subtitle)
+        subtitle.hide()
         toolbar = QHBoxLayout()
         toolbar.addWidget(button("+ Новое объявление", self.create, True))
         self.search = QLineEdit()
@@ -307,7 +327,7 @@ class Window(QMainWindow):
         self.search.textChanged.connect(self.refresh)
         toolbar.addWidget(self.search, 1)
         self.filter = QComboBox()
-        self.filter.addItems(["Все объявления", "Черновики", "В очереди", "Отправлены в S3"])
+        self.filter.addItems(["Все объявления", "Черновики", "В очереди", "Отправлены в S3", "Удалённые"])
         self.filter.currentIndexChanged.connect(self.refresh)
         toolbar.addWidget(self.filter)
         self.send_button = button("Отправить очередь", self.send, True)
@@ -346,10 +366,20 @@ class Window(QMainWindow):
         photo_bar.addStretch()
         form_body.addLayout(photo_bar)
         self.inputs = {}
-        form = QFormLayout()
-        form.setVerticalSpacing(12)
+        tabs = QTabWidget()
+        forms = {}
+        self.field_tabs = {}
+        for name in ("Объявление", "Параметры", "Доставка и контакты"):
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setVerticalSpacing(10)
+            forms[name] = form
+            tabs.addTab(page, name)
+        self.card_tabs = tabs
         choices = CHOICES
         self.field_errors = {}
+        self.category_rows = {}
+        self.reveal_required = False
         for key, label in FIELDS.items():
             if key == "Description":
                 edit = QTextEdit()
@@ -389,20 +419,28 @@ class Window(QMainWindow):
             error.hide()
             self.field_errors[key] = error
             field_layout.addWidget(error)
-            form.addRow(label + (" *" if key in REQUIRED else ""), field)
-        form_body.addLayout(form)
+            section = "Объявление" if key in {"Title", "Price", "Description"} else "Доставка и контакты" if key in {"Delivery", "Address", "ManagerName", "ContactPhone", "ContactMethod"} else "Параметры"
+            forms[section].addRow(label + (" *" if key in REQUIRED else ""), field)
+            self.field_tabs[key] = list(forms).index(section)
+            if key in {"Category", "GoodsType", "Apparel"}:
+                self.category_rows[key] = (forms[section], field)
+        form_body.addWidget(tabs)
         info = QLabel("* Обязательные поля. Справочник Авито от 10.09.2026: мужская одежда → кофты и футболки.\n"
                       "Проверка полей не заменяет модерацию и проверку тарифа, телефона и доставки в аккаунте Авито.")
         info.setWordWrap(True)
         info.setProperty("muted", True)
-        form_body.addWidget(info)
+        tabs.setToolTip(info.text())
+        info.hide()
         scroll.setWidget(content)
         body.addWidget(scroll)
         actions = QHBoxLayout()
-        actions.addWidget(button("Сохранить черновик", self.save))
-        actions.addWidget(button("Проверить", self.check_card))
-        actions.addWidget(button("Дублировать", self.duplicate))
-        actions.addWidget(button("Убрать из очереди", self.unqueue))
+        extra = QPushButton("Действия")
+        extra_menu = QMenu(extra)
+        for label, callback in [("Проверить поля", self.check_card), ("Создать копию", self.duplicate), ("Убрать из очереди", self.unqueue), ("Удалить из автозагрузки", self.remove_listing), ("Восстановить карточку", self.restore_listing)]:
+            extra_menu.addAction(label, callback)
+        extra.setMenu(extra_menu)
+        actions.addWidget(extra)
+        actions.addWidget(QLabel("Черновик сохраняется автоматически"))
         actions.addStretch()
         actions.addWidget(button("В очередь / обновить", self.enqueue, True))
         body.addLayout(actions)
@@ -416,6 +454,65 @@ class Window(QMainWindow):
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.save)
         self.refresh()
+        self.update_worker = None
+        self.update_available = None
+
+    def check_updates(self, manual=False):
+        if self.update_worker and self.update_worker.isRunning():
+            return
+        if self.worker:
+            if manual:
+                self.statusBar().showMessage("Проверка обновлений доступна после отправки очереди.")
+            return
+        self.update_worker = UpdateWorker()
+        self.update_worker.result.connect(lambda info: self.update_found(info, manual))
+        self.update_worker.failed.connect(lambda message: self.statusBar().showMessage("Обновления: " + message) if manual else None)
+        self.update_worker.start()
+
+    def update_found(self, info, manual):
+        if not info:
+            if manual:
+                self.statusBar().showMessage("Установлена последняя версия клиента.")
+            return
+        self.update_available = info
+        self.statusBar().showMessage("Доступно обновление " + info["tag"])
+        if not hasattr(self, "update_button"):
+            self.update_button = button("Обновить клиент", self.start_update)
+            self.statusBar().addPermanentWidget(self.update_button)
+        self.update_button.show()
+
+    def start_update(self):
+        import sys
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Обновление", "Обновления устанавливаются в EXE-сборке клиента.")
+            return
+        if self.worker or (self.update_worker and self.update_worker.isRunning()):
+            return
+        self.save()
+        self.centralWidget().setEnabled(False)
+        self.update_button.setEnabled(False)
+        self.update_worker = UpdateWorker(self.update_available)
+        self.update_worker.progress.connect(self.statusBar().showMessage)
+        self.update_worker.result.connect(self.update_ready)
+        self.update_worker.failed.connect(self.update_failed)
+        self.update_worker.start()
+
+    def update_failed(self, message):
+        self.centralWidget().setEnabled(True)
+        self.update_button.setEnabled(True)
+        QMessageBox.warning(self, "Обновление не установлено", message + "\nТекущая версия и данные сохранены.")
+
+    def update_ready(self, folder):
+        if self.update_worker.isRunning():
+            QTimer.singleShot(100, lambda: self.update_ready(folder))
+            return
+        from .updater import launch_install
+        try:
+            launch_install(folder)
+        except Exception as exc:
+            self.update_failed(str(exc))
+            return
+        self.close()
 
     def changed(self, *args):
         if not self.loading and self.current:
@@ -442,6 +539,8 @@ class Window(QMainWindow):
             self.statusBar().showMessage("Черновик сохранён на компьютере")
 
     def status(self, row):
+        if row["removal"]:
+            return "Удаление в очереди" if row["removal"] == "pending" else "Удалено из фида"
         if row["queued"]:
             return "В очереди · есть новые правки" if row["draft"] != row["queued"] else "Обновление в очереди" if row["sent"] else "В очереди"
         if row["sent"]:
@@ -453,14 +552,18 @@ class Window(QMainWindow):
         self.list.blockSignals(True)
         self.list.clear()
         rows = self.store.all()
-        queued = sum(bool(r["queued"]) for r in rows)
+        queued = sum(bool(r["queued"]) or r["removal"] == "pending" for r in rows)
         sent = sum(bool(r["sent"]) for r in rows)
         self.counts.setText(f"Всего {len(rows)}     ·     В очереди {queued}     ·     Отправлены в S3 {sent}")
         self.send_button.setText(f"Отправить очередь ({queued})")
         self.send_button.setEnabled(queued > 0)
         for row in rows:
             mode = self.filter.currentIndex()
-            if (mode == 1 and (row["queued"] or row["sent"])) or (mode == 2 and not row["queued"]) or (mode == 3 and not row["sent"]):
+            if row["removal"] == "removed" and mode != 4:
+                continue
+            if mode == 4 and not row["removal"]:
+                continue
+            if (mode == 1 and (row["queued"] or row["sent"])) or (mode == 2 and not row["queued"] and row["removal"] != "pending") or (mode == 3 and not row["sent"]):
                 continue
             title = row["draft"]["fields"].get("Title") or "Без заголовка"
             if self.search.text().casefold() not in title.casefold():
@@ -482,6 +585,7 @@ class Window(QMainWindow):
 
     def load(self, ad):
         self.loading = True
+        self.reveal_required = False
         self.current = copy.deepcopy(ad)
         self.editor.setEnabled(True)
         for key, edit in self.inputs.items():
@@ -510,8 +614,9 @@ class Window(QMainWindow):
     def show_state(self):
         if self.current:
             row = self.store.get(self.current["id"])
-            self.state.setText(f"{self.status(row)}\nID: {self.current['id']}\n"
-                "Правки сохраняются в черновик. Для отправки нажмите «В очередь / обновить».")
+            self.state.setText(self.status(row))
+            self.state.setToolTip("ID: " + self.current["id"])
+
 
     def create(self):
         self.save()
@@ -584,12 +689,18 @@ class Window(QMainWindow):
         for key, label in self.field_errors.items():
             text = "\n".join(issues.get(key, []))
             label.setText(text)
-            label.setVisible(bool(text))
+            label.setVisible(bool(text) and (self.reveal_required or bool(ad["fields"].get(key))))
+        for key, (form, field) in self.category_rows.items():
+            form.setRowVisible(field, bool(issues.get(key)))
+        for index, name in enumerate(("Объявление", "Параметры", "Доставка и контакты")):
+            count = sum(len(messages) for key, messages in issues.items() if self.field_tabs.get(key) == index)
+            self.card_tabs.setTabText(index, name + (f" ({count})" if count and self.reveal_required else ""))
         errors = validate(ad) + validate_assets(ad, self.store.root)
         self.photo_list.setToolTip("\n".join(issues.get("photos", [])))
         return errors
 
     def check_card(self):
+        self.reveal_required = True
         self.save()
         errors = self.show_validation()
         if errors:
@@ -598,6 +709,7 @@ class Window(QMainWindow):
             QMessageBox.information(self, "Проверка", "Поля и фотографии прошли локальную проверку. Окончательное решение — после обработки Авито.")
 
     def enqueue(self):
+        self.reveal_required = True
         self.save()
         if not self.current:
             return
@@ -615,6 +727,27 @@ class Window(QMainWindow):
             self.store.unqueue(self.current["id"])
             self.refresh()
             self.show_state()
+
+    def remove_listing(self):
+        self.save()
+        if not self.current:
+            return
+        answer = QMessageBox.question(self, "Удалить из автозагрузки?",
+            "После отправки очереди объявление исчезнет из XML-фида. Карточка останется в разделе «Удалённые».\n\n"
+            "Снятие с публикации проверяйте в отчёте Авито. Удалить из фида?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.store.remove_from_feed(self.current["id"])
+            self.refresh()
+            self.show_state()
+
+    def restore_listing(self):
+        self.save()
+        if self.current:
+            self.store.restore(self.current["id"])
+            self.refresh()
+            self.show_state()
+            self.statusBar().showMessage("Карточка восстановлена. Для возврата в фид добавьте её в очередь.")
 
     def settings(self):
         try:
@@ -648,7 +781,7 @@ class Window(QMainWindow):
         if problems:
             QMessageBox.warning(self, "Фид не отправлен — исправьте карточки", "\n\n".join(problems))
             return
-        if not ads:
+        if not ads and not self.store.pending_removals():
             return
         self.job_id = self.store.begin_job(ads)
         self.centralWidget().setEnabled(False)
@@ -705,6 +838,10 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "Идёт отправка", "Дождитесь завершения отправки перед закрытием клиента.")
+            event.ignore()
+            return
+        if self.update_worker and self.update_worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения проверки или скачивания обновления.")
             event.ignore()
             return
         self.save()

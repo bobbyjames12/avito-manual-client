@@ -37,6 +37,25 @@ class Store:
             );
         """)
 
+        columns = {r[1] for r in self.db.execute("PRAGMA table_info(ads)")}
+        if "removal" not in columns:
+            self.db.execute("ALTER TABLE ads ADD COLUMN removal TEXT NOT NULL DEFAULT ''")
+        columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
+        if "removals" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN removals TEXT NOT NULL DEFAULT '[]'")
+        self.db.commit()
+
+    def remove_from_feed(self, ad_id):
+        with self.db:
+            self.db.execute("UPDATE ads SET removal='pending', queued=NULL, updated=? WHERE id=?", (timestamp(), ad_id))
+
+    def restore(self, ad_id):
+        with self.db:
+            self.db.execute("UPDATE ads SET removal='', updated=? WHERE id=?", (timestamp(), ad_id))
+
+    def pending_removals(self):
+        return [r["id"] for r in self.all() if r["removal"] == "pending"]
+
     def close(self):
         self.db.close()
 
@@ -70,11 +89,11 @@ class Store:
             raise ValueError("\n".join(errors))
         self.save(ad)
         with self.db:
-            self.db.execute("UPDATE ads SET queued=draft WHERE id=?", (ad["id"],))
+            self.db.execute("UPDATE ads SET queued=draft, removal='' WHERE id=?", (ad["id"],))
 
     def unqueue(self, ad_id):
         with self.db:
-            self.db.execute("UPDATE ads SET queued=NULL WHERE id=?", (ad_id,))
+            self.db.execute("UPDATE ads SET queued=NULL, removal=CASE WHEN removal='pending' THEN '' ELSE removal END WHERE id=?", (ad_id,))
 
     def delete_draft(self, ad_id):
         row = self.get(ad_id)
@@ -94,17 +113,18 @@ class Store:
         return name
 
     def snapshot(self):
-        return [row["queued"] or row["sent"] for row in self.all() if row["queued"] or row["sent"]]
+        return [row["queued"] or row["sent"] for row in self.all() if not row["removal"] and (row["queued"] or row["sent"])]
 
     def begin_job(self, ads):
         job_id = uuid4().hex
         with self.db:
             self.db.execute("INSERT INTO jobs(id,created,status,snapshot) VALUES(?,?,?,?)",
                 (job_id, timestamp(), "sending", json.dumps(ads, ensure_ascii=False)))
+            self.db.execute("UPDATE jobs SET removals=? WHERE id=?", (json.dumps(self.pending_removals()), job_id))
         return job_id
 
     def complete_job(self, job_id, url):
-        job = self.db.execute("SELECT snapshot FROM jobs WHERE id=?", (job_id,)).fetchone()
+        job = self.db.execute("SELECT snapshot,removals FROM jobs WHERE id=?", (job_id,)).fetchone()
         with self.db:
             for ad in json.loads(job[0]):
                 row = self.get(ad["id"])
@@ -112,6 +132,8 @@ class Store:
                                 (json.dumps(ad, ensure_ascii=False), ad["id"]))
                 if row["queued"] == ad:
                     self.db.execute("UPDATE ads SET queued=NULL WHERE id=?", (ad["id"],))
+            for ad_id in json.loads(job[1]):
+                self.db.execute("UPDATE ads SET sent=NULL, removal='removed' WHERE id=? AND removal='pending'", (ad_id,))
             self.db.execute("UPDATE jobs SET status='sent', detail=? WHERE id=?", (url, job_id))
 
     def fail_job(self, job_id, detail):
