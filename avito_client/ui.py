@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTextEdit, QComboBox, QFormLayout, QScrollArea,
     QListWidget, QListWidgetItem, QSplitter, QFileDialog, QMessageBox,
-    QDialog, QDialogButtonBox, QCheckBox, QAbstractItemView,
+    QDialog, QDialogButtonBox, QCheckBox, QAbstractItemView, QCompleter,
 )
 
-from .model import new_ad, FIELDS, validate
+from .model import new_ad, FIELDS, validate, CHOICES, MULTIPLE, REQUIRED, field_issues, validate_assets, SUPPORTED_DELIVERY
 from .store import Store
 from .profile import read_profile
 from .secrets import protect, unprotect
@@ -72,6 +72,47 @@ def button(text, callback, primary=False):
     result.setProperty("primary", primary)
     result.clicked.connect(lambda checked=False: callback())
     return result
+
+
+class MultiChoice(QListWidget):
+    currentTextChanged = Signal(str)
+
+    def __init__(self, key):
+        super().__init__()
+        self.key = key
+        self.setFixedHeight(135)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.setToolTip("Отметьте один или несколько вариантов. Для выключения доставки снимите остальные отметки.")
+        for value in CHOICES[key]:
+            item = QListWidgetItem(value)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            if key == "Delivery" and value not in SUPPORTED_DELIVERY:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                item.setToolTip("Требует дополнительных настроек собственного перевозчика; пока не поддерживается клиентом.")
+            self.addItem(item)
+        self.itemChanged.connect(lambda item: self.currentTextChanged.emit(self.currentText()))
+
+    def currentText(self):
+        return " | ".join(self.item(i).text() for i in range(self.count()) if self.item(i).checkState() == Qt.CheckState.Checked)
+
+    def setCurrentText(self, text):
+        selected = [v.strip() for v in text.split("|") if v.strip()]
+        for i in reversed(range(self.count())):
+            if self.item(i).text() not in CHOICES[self.key]:
+                self.takeItem(i)
+        for value in selected:
+            if value not in CHOICES[self.key]:
+                item = QListWidgetItem(value)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                self.addItem(item)
+        for i in range(self.count()):
+            item = self.item(i)
+            if item.text() in selected:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEnabled)
+            elif self.key == "Delivery" and item.text() not in SUPPORTED_DELIVERY:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Checked if item.text() in selected else Qt.CheckState.Unchecked)
 
 
 class Worker(QThread):
@@ -256,7 +297,7 @@ class Window(QMainWindow):
         top.addWidget(button("Резервная копия", self.backup))
         top.addWidget(button("Настройки S3", self.settings))
         layout.addLayout(top)
-        subtitle = QLabel("Футболки  /  Ручное заполнение  /  Автозагрузка по постоянной ссылке")
+        subtitle = QLabel("Кофты и футболки  /  Ручное заполнение  /  Автозагрузка по постоянной ссылке")
         subtitle.setProperty("muted", True)
         layout.addWidget(subtitle)
         toolbar = QHBoxLayout()
@@ -307,14 +348,8 @@ class Window(QMainWindow):
         self.inputs = {}
         form = QFormLayout()
         form.setVerticalSpacing(12)
-        choices = {
-            "GoodsType": ["Мужская одежда", "Женская одежда"],
-            "Condition": ["", "Новое с биркой", "Новое без бирки", "Отличное", "Хорошее", "Удовлетворительное"],
-            "Size": ["", "40 (XXS)", "42 (XS)", "44 (S)", "46 (S)", "48 (M)", "50 (L)", "52 (XL)", "54 (XXL)", "56 (XXXL)"],
-            "Color": ["", "Белый", "Чёрный", "Серый", "Красный", "Синий", "Зелёный", "Бежевый", "Разноцветный"],
-            "AdType": ["", "Товар приобретен на\u00a0продажу", "Продаю своё"],
-            "ContactMethod": ["По телефону и в сообщениях", "В сообщениях", "По телефону"],
-        }
+        choices = CHOICES
+        self.field_errors = {}
         for key, label in FIELDS.items():
             if key == "Description":
                 edit = QTextEdit()
@@ -322,10 +357,19 @@ class Window(QMainWindow):
                 edit.setMinimumHeight(155)
                 edit.setPlaceholderText("Опишите футболку: ткань, посадка, состояние, особенности…")
                 edit.textChanged.connect(self.changed)
+            elif key in MULTIPLE:
+                edit = MultiChoice(key)
+                edit.currentTextChanged.connect(self.changed)
             elif key in choices:
                 edit = QComboBox()
-                edit.setEditable(key in ("Size", "Color"))
-                edit.addItems(choices[key])
+                edit.setEditable(key == "Brand")
+                edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                edit.addItems([""] + choices[key])
+                if key == "Brand":
+                    edit.setToolTip("Начните вводить бренд и выберите из справочника Авито. Без марки — «Без бренда».")
+                    edit.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+                    edit.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                    edit.completer().setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
                 edit.currentTextChanged.connect(self.changed)
             else:
                 edit = QLineEdit()
@@ -335,10 +379,20 @@ class Window(QMainWindow):
                     edit.setPlaceholderText("Название бренда или «Без бренда»")
                 edit.textChanged.connect(self.changed)
             self.inputs[key] = edit
-            form.addRow(label, edit)
+            field = QWidget()
+            field_layout = QVBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.addWidget(edit)
+            error = QLabel()
+            error.setWordWrap(True)
+            error.setStyleSheet("color: #b42318; font-size: 12px;")
+            error.hide()
+            self.field_errors[key] = error
+            field_layout.addWidget(error)
+            form.addRow(label + (" *" if key in REQUIRED else ""), field)
         form_body.addLayout(form)
-        info = QLabel("Поля основаны на шаблоне одежды из пайплайна. Авито выполняет свою проверку\n"
-                      "категории и значений при обработке. Публикация в S3 не подтверждает размещение.")
+        info = QLabel("* Обязательные поля. Справочник Авито от 10.09.2026: мужская одежда → кофты и футболки.\n"
+                      "Проверка полей не заменяет модерацию и проверку тарифа, телефона и доставки в аккаунте Авито.")
         info.setWordWrap(True)
         info.setProperty("muted", True)
         form_body.addWidget(info)
@@ -346,6 +400,7 @@ class Window(QMainWindow):
         body.addWidget(scroll)
         actions = QHBoxLayout()
         actions.addWidget(button("Сохранить черновик", self.save))
+        actions.addWidget(button("Проверить", self.check_card))
         actions.addWidget(button("Дублировать", self.duplicate))
         actions.addWidget(button("Убрать из очереди", self.unqueue))
         actions.addStretch()
@@ -372,7 +427,7 @@ class Window(QMainWindow):
             return None
         ad = copy.deepcopy(self.current)
         for key, edit in self.inputs.items():
-            ad["fields"][key] = edit.toPlainText() if isinstance(edit, QTextEdit) else edit.currentText() if isinstance(edit, QComboBox) else edit.text()
+            ad["fields"][key] = edit.toPlainText() if isinstance(edit, QTextEdit) else edit.currentText() if isinstance(edit, (QComboBox, MultiChoice)) else edit.text()
         return ad
 
     def save(self):
@@ -383,6 +438,7 @@ class Window(QMainWindow):
             self.dirty = False
             self.refresh()
             self.show_state()
+            self.show_validation()
             self.statusBar().showMessage("Черновик сохранён на компьютере")
 
     def status(self, row):
@@ -432,7 +488,15 @@ class Window(QMainWindow):
             value = ad["fields"].get(key, "")
             if isinstance(edit, QTextEdit):
                 edit.setPlainText(value)
-            elif isinstance(edit, QComboBox):
+            elif isinstance(edit, (QComboBox, MultiChoice)):
+                if isinstance(edit, QComboBox):
+                    for index in reversed(range(edit.count())):
+                        if edit.itemData(index, Qt.ItemDataRole.UserRole) == "legacy-invalid":
+                            edit.removeItem(index)
+                    value = value.replace("\xa0", " ")
+                    if value and edit.findText(value) < 0:
+                        edit.addItem(value, "legacy-invalid")
+                        edit.model().item(edit.count() - 1).setEnabled(False)
                 edit.setCurrentText(value)
             else:
                 edit.setText(value)
@@ -440,6 +504,7 @@ class Window(QMainWindow):
         self.loading = False
         self.dirty = False
         self.show_state()
+        self.show_validation()
         self.refresh()
 
     def show_state(self):
@@ -477,6 +542,12 @@ class Window(QMainWindow):
             return
         invalid = []
         for path in paths:
+            if len(self.current["photos"]) >= 10:
+                invalid.append(Path(path).name + ": максимум 10 фото в объявлении")
+                continue
+            if Path(path).stat().st_size > 25 * 1024 * 1024:
+                invalid.append(Path(path).name + ": файл больше 25 МБ")
+                continue
             if QPixmap(path).isNull():
                 invalid.append(Path(path).name)
                 continue
@@ -505,11 +576,32 @@ class Window(QMainWindow):
             self.photos()
             self.changed()
 
+    def show_validation(self):
+        if not self.current:
+            return []
+        ad = self.capture()
+        issues = field_issues(ad)
+        for key, label in self.field_errors.items():
+            text = "\n".join(issues.get(key, []))
+            label.setText(text)
+            label.setVisible(bool(text))
+        errors = validate(ad) + validate_assets(ad, self.store.root)
+        self.photo_list.setToolTip("\n".join(issues.get("photos", [])))
+        return errors
+
+    def check_card(self):
+        self.save()
+        errors = self.show_validation()
+        if errors:
+            QMessageBox.warning(self, "Что исправить", "\n".join(errors))
+        else:
+            QMessageBox.information(self, "Проверка", "Поля и фотографии прошли локальную проверку. Окончательное решение — после обработки Авито.")
+
     def enqueue(self):
         self.save()
         if not self.current:
             return
-        errors = validate(self.current)
+        errors = self.show_validation()
         if errors:
             QMessageBox.warning(self, "Проверьте объявление", "\n".join(errors))
             return
@@ -548,6 +640,14 @@ class Window(QMainWindow):
             self.settings()
             return
         ads = self.store.snapshot()
+        problems = []
+        for ad in ads:
+            errors = validate(ad) + validate_assets(ad, self.store.root)
+            if errors:
+                problems.append((ad["fields"].get("Title") or ad["id"]) + ":\n" + "\n".join(errors))
+        if problems:
+            QMessageBox.warning(self, "Фид не отправлен — исправьте карточки", "\n\n".join(problems))
+            return
         if not ads:
             return
         self.job_id = self.store.begin_job(ads)

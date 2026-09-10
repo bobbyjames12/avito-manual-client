@@ -4,7 +4,7 @@ import re
 from urllib.parse import quote, urlsplit
 from urllib.request import urlopen
 from urllib.error import HTTPError, URLError
-from .model import build_xml
+from .model import build_xml, validate_assets
 
 
 def check_config(config):
@@ -37,6 +37,10 @@ def publish(ads, root, config, progress=lambda message: None, client=None, publi
     prefix = config["prefix"].strip("/")
     photo_key = lambda name: f"{prefix}/photos/{name}"
     xml = build_xml(ads, lambda name: public_url(config, photo_key(name)))
+    for ad in ads:
+        errors = validate_assets(ad, root)
+        if errors:
+            raise ValueError("\n".join(errors))
     photos = sorted({name for ad in ads for name in ad["photos"]})
     for name in photos:
         if Path(name).name != name or not (Path(root) / "photos" / name).is_file():

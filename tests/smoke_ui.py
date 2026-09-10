@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory() as temp:
     window.create()
     values = dict(Title="Футболка хлопковая, белая", Description="Базовая футболка из плотного хлопка.\nПрямой крой, круглый вырез.",
         Price="1200", Brand="Без бренда", Color="Белый", Size="48 (M)",
-        Condition="Новое с биркой", AdType="Продаю своё", Address="Москва", ContactPhone="+79990000000")
+        Condition="Новое с биркой", AdType="Товар приобретен на продажу", Delivery="ПВЗ", Address="Москва", ContactPhone="+79990000000")
     for key, value in values.items():
         edit = window.inputs[key]
         if hasattr(edit, "setPlainText"):

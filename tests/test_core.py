@@ -17,7 +17,7 @@ def listing(title="Футболка"):
     ad = new_ad()
     ad["fields"].update(Title=title, Description="Хлопок & принт <тест>", Price="1200",
         Condition="Новое с биркой", Size="48 (M)", Brand="Без бренда", Color="Белый",
-        AdType="Продаю своё", Address="Москва", ContactPhone="+79990000000")
+        AdType="Товар приобретен на продажу", Delivery="ПВЗ", Address="Москва", ContactPhone="+79990000000")
     ad["photos"] = ["photo.jpg"]
     return ad
 

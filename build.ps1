@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-& .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --name AvitoManualClient --collect-data botocore main.py
+& .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --name AvitoManualClient --collect-data botocore --add-data "avito_client/catalog.json;avito_client" main.py
 if ($LASTEXITCODE -ne 0) { throw 'Сборка EXE не удалась' }
 # Qt uses Windows' unversioned ICU API. PyInstaller can collect an incompatible
 # icuuc.dll from another PATH entry (ICU 78 exports suffixed symbols).
